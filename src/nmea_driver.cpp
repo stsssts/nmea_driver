@@ -6,6 +6,7 @@
 
 #include <ros/ros.h>
 
+#include <std_msgs/Float64.h>
 #include <nmea_msgs/Gprmc.h>
 #include <nmea_msgs/Gpgga.h>
 #include <nmea_msgs/Gpgsa.h>
@@ -29,6 +30,9 @@ public:
     }
 
     _configureDevice();
+    _readLine(); // wipe input
+
+    _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
     _rmc_publisher = nh.advertise<nmea_msgs::Gprmc>("gprmc", 1);
     _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
     _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
@@ -51,6 +55,7 @@ private:
   int _device_fd;
   char buffer[82+1]; // maximum sentence length according to NMEA specification + \0
 
+  ros::Publisher _hdt_publisher;
   ros::Publisher _rmc_publisher;
   ros::Publisher _gga_publisher;
   ros::Publisher _gsa_publisher;
@@ -120,13 +125,13 @@ private:
       checksum ^= *(++c);
 
     char str_checksum[3];
-    sprintf(str_checksum, "%X", checksum);
+    sprintf(str_checksum, "%02X", checksum);
 
     if (strncmp(c+2, str_checksum, 2) == 0)
       return true;
     else
     {
-      ROS_ERROR("Message checksum is incorrect!");
+      ROS_ERROR("Message checksum is incorrect, calculated: %s", str_checksum);
       ROS_ERROR_STREAM(buffer);
       return false;
     }
@@ -140,24 +145,42 @@ private:
     {
       if (strncmp(c+2, "RMC", 3) == 0)
         _publishRMC();
-
-      else if (strncmp(c+2, "GGA", 3) == 0)
+      if (strncmp(c+2, "GGA", 3) == 0)
         _publishGGA();
-
       else if (strncmp(c+2, "GSA", 3) == 0)
         _publishGSA();
-
       else if (strncmp(c+2, "GSV", 3) == 0)
         _publishGSV();
+      else if (strncmp(c+2, "HDT", 3) == 0)
+        _publishHDT();
     }
+  }
+
+  std::vector<std::string> _splitSentence(const std::string& s, char delimiter)
+  {
+    std::vector<std::string> tokens;
+    std::istringstream tokenStream(s);
+
+    for (std::string token; std::getline(tokenStream, token, delimiter);)
+    {
+      if (!token.empty())
+        tokens.push_back(token);
+      else
+        tokens.push_back("0");
+    }
+
+    if (s.back() == ',')
+      tokens.push_back("0");
+
+    return tokens;
   }
 
   void _publishRMC()
   {
     // $GPRMC,000101.20,V,0000.0000000,N,00000.0000000,E,0.00,0.00,,,,N*44
 
-    std::string sentence = _split(std::string(buffer+7), '*')[0];
-    std::vector<std::string> tokens = _split(sentence, ',');
+    std::string sentence = _splitSentence(std::string(buffer+7), '*')[0];
+    std::vector<std::string> tokens = _splitSentence(sentence, ',');
 
     nmea_msgs::Gprmc msg;
     msg.header.stamp = ros::Time::now();
@@ -171,12 +194,9 @@ private:
     msg.speed = std::stof(tokens[6]);
     msg.track = std::stof(tokens[7]);
     msg.date = tokens[8];
-    if (!tokens[9].empty())
-      msg.mag_var = std::stof(tokens[9]);
-    if (!tokens[10].empty())
-      msg.mag_var_direction = tokens[10];
-    if (!tokens[11].empty())
-      msg.mode_indicator = tokens[11];
+    msg.mag_var = std::stof(tokens[9]);
+    msg.mag_var_direction = tokens[10];
+    msg.mode_indicator = tokens[11];
 
     _rmc_publisher.publish(msg);
   }
@@ -185,8 +205,8 @@ private:
   {
     // $GPGGA,144148.88,0000.0000000,N,00000.0000000,E,0,00,,-17.162,M,17.162,M,,*52
 
-    std::string sentence = _split(std::string(buffer + 7), '*')[0];
-    std::vector<std::string> tokens = _split(sentence, ',');
+    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
+    std::vector<std::string> tokens = _splitSentence(sentence, ',');
 
     nmea_msgs::Gpgga msg;
     msg.header.stamp = ros::Time::now();
@@ -198,16 +218,13 @@ private:
     msg.lon_dir = tokens[4];
     msg.gps_qual = std::stoi(tokens[5]);
     msg.num_sats = std::stoi(tokens[6]);
-    if (!tokens[7].empty())
-      msg.hdop = std::stof(tokens[7]);
+    msg.hdop = std::stof(tokens[7]);
     msg.alt = std::stof(tokens[8]);
     msg.altitude_units = tokens[9];
     msg.undulation = std::stof(tokens[10]);
     msg.undulation_units = tokens[11];
-    if (!tokens[12].empty())
-      msg.diff_age = std::stoi(tokens[12]);
-    if (tokens.size() == 14)
-       msg.station_id = std::stoi(tokens[13]);
+    msg.diff_age = std::stoi(tokens[12]);
+    msg.station_id = tokens[13];
 
     _gga_publisher.publish(msg);
   }
@@ -215,8 +232,8 @@ private:
   void _publishGSA()
   {
     // $GPGSA,A,1,,,,,,,,,,,,,,,,*32
-    std::string sentence = _split(std::string(buffer +7), '*')[0];
-    std::vector<std::string> tokens = _split(sentence, ',');
+    std::string sentence = _splitSentence(std::string(buffer +7), '*')[0];
+    std::vector<std::string> tokens = _splitSentence(sentence, ',');
 
     nmea_msgs::Gpgsa msg;
     msg.header.stamp = ros::Time::now();
@@ -225,16 +242,11 @@ private:
     msg.fix_mode = std::stoi(tokens[1]);
 
     for (int i = 0; i < 12; ++i)
-    {
-      if (!tokens[i+2].empty())
-        msg.sv_ids.push_back(std::stoi(tokens[i+2]));
-    }
-    if (!tokens[14].empty())
-      msg.pdop = std::stof(tokens[14]);
-    if (!tokens[15].empty())
-      msg.hdop = std::stof(tokens[15]);
-    if (!tokens[16].empty())
-      msg.vdop = std::stof(tokens[16]);
+      msg.sv_ids.push_back(std::stoi(tokens[i+2]));
+
+    msg.pdop = std::stof(tokens[14]);
+    msg.hdop = std::stof(tokens[15]);
+    msg.vdop = std::stof(tokens[16]);
 
     _gsa_publisher.publish(msg);
   }
@@ -242,8 +254,8 @@ private:
   void _publishGSV()
   {
     // $GLGSV,1,1,0,,,,,*79
-    std::string sentence = _split(std::string(buffer + 7), '*')[0];
-    std::vector<std::string> tokens = _split(sentence, ',');
+    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
+    std::vector<std::string> tokens = _splitSentence(sentence, ',');
 
     nmea_msgs::Gpgsv msg;
     msg.header.stamp = ros::Time::now();
@@ -252,16 +264,13 @@ private:
     msg.msg_number = std::stoi(tokens[1]);
     msg.n_satellites = std::stoi(tokens[2]);
 
-    for (int i = 0; i < msg.n_satellites; ++i)
+    for (int i = 0; i < msg.n_msgs; ++i)
     {
       nmea_msgs::GpgsvSatellite sat;
       sat.prn = std::stoi(tokens[4*i + 3]);
-      if (!tokens[4*i + 4].empty())
-        sat.elevation = std::stoi(tokens[4*i + 4]);
-      if (!tokens[4*i + 5].empty())
-        sat.azimuth = std::stoi(tokens[4*i + 5]);
-      if (!tokens[4*i + 6].empty())
-        sat.snr = std::stoi(tokens[4*i + 6]);
+      sat.elevation = std::stoi(tokens[4*i + 4]);
+      sat.azimuth = std::stoi(tokens[4*i + 5]);
+      sat.snr = std::stoi(tokens[4*i + 6]);
 
       msg.satellites.push_back(sat);
     }
@@ -269,16 +278,17 @@ private:
     _gsv_publisher.publish(msg);
   }
 
-  std::vector<std::string> _split(const std::string& s, char delimiter)
+  void _publishHDT()
   {
-    std::vector<std::string> tokens;
-    std::string token;
-    std::istringstream tokenStream(s);
+    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
+    std::vector<std::string> tokens = _splitSentence(sentence, ',');
 
-    while (std::getline(tokenStream, token, delimiter))
-      tokens.push_back(token);
-
-    return tokens;
+    if (!tokens[0].empty())
+    {
+      std_msgs::Float64 msg;
+      msg.data = std::stof(tokens[0]);
+      _hdt_publisher.publish(msg);
+    }
   }
 };
 
@@ -290,9 +300,7 @@ int main(int argc, char **argv)
   NMEADevice compas(nh);
 
   while (ros::ok())
-  {
     compas.update();
-  }
 
   return 0;
 }

@@ -9,6 +9,7 @@ project(nmea_driver)
 ## is used, also find other catkin packages
 find_package(catkin REQUIRED COMPONENTS
   roscpp
+  std_msgs
   nmea_msgs
 )
 
