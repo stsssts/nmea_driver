@@ -7,21 +7,35 @@
 #include <ros/ros.h>
 
 #include <std_msgs/Float64.h>
+
 #include <nmea_msgs/Gprmc.h>
 #include <nmea_msgs/Gpgga.h>
 #include <nmea_msgs/Gpgsa.h>
 #include <nmea_msgs/Gpgsv.h>
-#include <nmea_msgs/GpgsvSatellite.h>
 
 
 class NMEADevice
 {
 public:
+  enum class DeviceType { GPS, DPT };
+
   NMEADevice(ros::NodeHandle& nh)
   {
     ros::NodeHandle pnh("~");
     std::string addr = pnh.param<std::string>("port", "/dev/ttyUSB0");
+    int b_rate = pnh.param<int>("baudrate", 115200);
 
+    std::string d_type = pnh.param<std::string>("device_type", "GPS");
+    if (d_type == "GPS")
+      _device_type = DeviceType::GPS;
+    else if (d_type == "DPT")
+      _device_type = DeviceType::DPT;
+    else
+    {
+      ROS_FATAL("Device type %s is unavailible", d_type.c_str());
+      throw std::exception();
+    }
+      
     _device_fd = open(addr.c_str(), O_RDONLY | O_NOCTTY);
     if (_device_fd == -1)
     {
@@ -29,7 +43,7 @@ public:
       throw std::exception();
     }
 
-    _configureDevice();
+    _configureDevice(b_rate);
     _readLine(); // wipe input
 
     _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
@@ -37,12 +51,18 @@ public:
     _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
     _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
     _gsv_publisher = nh.advertise<nmea_msgs::Gpgsv>("gpgsv", 1);
+
+    _dpt_publisher = nh.advertise<std_msgs::Float64>("dpt", 1);
   }
 
   ~NMEADevice()
   {
     close(_device_fd);
   }
+
+  NMEADevice(const NMEADevice&) = delete;
+
+  NMEADevice operator=(const NMEADevice&) = delete;
 
   void update()
   {
@@ -54,14 +74,16 @@ public:
 private:
   int _device_fd;
   char buffer[82+1]; // maximum sentence length according to NMEA specification + \0
+  DeviceType _device_type;
 
   ros::Publisher _hdt_publisher;
   ros::Publisher _rmc_publisher;
   ros::Publisher _gga_publisher;
   ros::Publisher _gsa_publisher;
   ros::Publisher _gsv_publisher;
+  ros::Publisher _dpt_publisher;
 
-  void _configureDevice()
+  void _configureDevice(const int baudrate)
   {
     termios tty;
     memset(&tty, 0, sizeof tty);
@@ -72,8 +94,33 @@ private:
       throw std::exception();
     }
 
-    cfsetospeed(&tty, (speed_t)B115200);
-    cfsetispeed(&tty, (speed_t)B115200);
+    speed_t s;
+    switch (baudrate)
+    {
+      case 4800:
+        s = B4800;
+        break;
+      case 9600:
+        s = B9600;
+        break;
+      case 19200:
+        s = B19200;
+        break;
+      case 38400:
+        s = B38400;
+        break;
+      case 57600:
+        s = B57600;
+        break;
+      case 115200:
+        s = B115200;
+        break;
+      default:
+        s = B115200;
+    }
+
+    cfsetospeed(&tty, s);
+    cfsetispeed(&tty, s);
 
     tty.c_cflag &= ~PARENB;        // 8N1
     tty.c_cflag &= ~CSIZE;
@@ -128,7 +175,10 @@ private:
     sprintf(str_checksum, "%02X", checksum);
 
     if (strncmp(c+2, str_checksum, 2) == 0)
+    {
+      *(c+1) = '\0'; // erase checksum from buffer
       return true;
+    }
     else
     {
       ROS_ERROR("Message checksum is incorrect, calculated: %s", str_checksum);
@@ -145,7 +195,7 @@ private:
     {
       if (strncmp(c+2, "RMC", 3) == 0)
         _publishRMC();
-      if (strncmp(c+2, "GGA", 3) == 0)
+      else if (strncmp(c+2, "GGA", 3) == 0)
         _publishGGA();
       else if (strncmp(c+2, "GSA", 3) == 0)
         _publishGSA();
@@ -153,6 +203,12 @@ private:
         _publishGSV();
       else if (strncmp(c+2, "HDT", 3) == 0)
         _publishHDT();
+
+    }
+    else if (strncmp(c, "SD", 2) == 0)
+    {
+      if (strncmp(c+2, "DPT", 3) == 0)
+        _publishDPT();
     }
   }
 
@@ -179,8 +235,7 @@ private:
   {
     // $GPRMC,000101.20,V,0000.0000000,N,00000.0000000,E,0.00,0.00,,,,N*44
 
-    std::string sentence = _splitSentence(std::string(buffer+7), '*')[0];
-    std::vector<std::string> tokens = _splitSentence(sentence, ',');
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer+7), ',');
 
     nmea_msgs::Gprmc msg;
     msg.header.stamp = ros::Time::now();
@@ -205,8 +260,7 @@ private:
   {
     // $GPGGA,144148.88,0000.0000000,N,00000.0000000,E,0,00,,-17.162,M,17.162,M,,*52
 
-    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
-    std::vector<std::string> tokens = _splitSentence(sentence, ',');
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
 
     nmea_msgs::Gpgga msg;
     msg.header.stamp = ros::Time::now();
@@ -232,8 +286,7 @@ private:
   void _publishGSA()
   {
     // $GPGSA,A,1,,,,,,,,,,,,,,,,*32
-    std::string sentence = _splitSentence(std::string(buffer +7), '*')[0];
-    std::vector<std::string> tokens = _splitSentence(sentence, ',');
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer +7), ',');
 
     nmea_msgs::Gpgsa msg;
     msg.header.stamp = ros::Time::now();
@@ -254,8 +307,7 @@ private:
   void _publishGSV()
   {
     // $GLGSV,1,1,0,,,,,*79
-    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
-    std::vector<std::string> tokens = _splitSentence(sentence, ',');
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
 
     nmea_msgs::Gpgsv msg;
     msg.header.stamp = ros::Time::now();
@@ -280,14 +332,31 @@ private:
 
   void _publishHDT()
   {
-    std::string sentence = _splitSentence(std::string(buffer + 7), '*')[0];
-    std::vector<std::string> tokens = _splitSentence(sentence, ',');
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
 
     if (!tokens[0].empty())
     {
       std_msgs::Float64 msg;
       msg.data = std::stof(tokens[0]);
       _hdt_publisher.publish(msg);
+    }
+  }
+
+  void _publishDPT()
+  {
+    /*
+     * baudrate 4800
+     * $SDDPT,25.1,0.0,*4D
+     *        ^    ^
+     *     depth  offset  
+     */
+    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
+
+    if (!tokens[0].empty())
+    {
+      std_msgs::Float64 msg;
+      msg.data = std::stof(tokens[0]);
+      _dpt_publisher.publish(msg);
     }
   }
 };
