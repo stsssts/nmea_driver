@@ -1,0 +1,7 @@
+<launch>
+  <node name="gps_driver" pkg="nmea_driver" type="nmea_driver" output="screen">
+    <param name="port" value="/dev/ttyUSB0" />
+    <param name="baudrate" value="115200" />
+    <param name="device_type" value="GPS" />
+  </node>
+</launch>
