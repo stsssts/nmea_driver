@@ -34,6 +34,7 @@ public:
 
     _configureDevice(baudrate);
     _readLine(); // wipe input
+    ROS_INFO("Device %s is connected at %i descr", address.c_str(), _device_fd);
   }
 
   ~SerialHandle()
@@ -56,9 +57,7 @@ public:
 
   bool getSentence(std::string& sentence)
   {
-    _readLine();
-
-    if (_checkResponse())
+    if (_readLine() && _checkResponse())
     {
       sentence = std::string(buffer+1);
       return true;
@@ -110,14 +109,12 @@ private:
     cfsetospeed(&tty, s);
     cfsetispeed(&tty, s);
 
-    tty.c_cflag &= ~PARENB;        // 8N1
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8;
-    tty.c_cflag &= ~CRTSCTS;       // no flow control
-    tty.c_cc[VMIN] = 1;            // read doesn't block
-    tty.c_cc[VTIME] = 5;           // 0.5 secs read timeout
-    tty.c_cflag |= CREAD | CLOCAL; // turn on READ & ignore ctrl lines
     cfmakeraw(&tty);               // make raw
+    tty.c_cc[VMIN] = 0;            // read doesn't block
+    tty.c_cc[VTIME] = 5;           // 0.5 secs read timeout
+
+    tty.c_cflag |= CREAD | CLOCAL; // turn on READ & ignore ctrl lines
+
 
     tcflush(_device_fd, TCIFLUSH);
     if (tcsetattr(_device_fd, TCSANOW, &tty) != 0)
@@ -129,20 +126,20 @@ private:
 
   bool _readLine()
   {
-    int n = 1;
     int spot = 0;
     char char_buf = '\0';
 
-    memset(buffer, '\0', 82);
-    while (n > 0)
+    memset(buffer, char_buf, sizeof(buffer));
+    while (read(_device_fd, &char_buf, 1) > 0)
     {
-      n = read(_device_fd, &char_buf, 1);
       sprintf(&buffer[spot++], "%c", char_buf);
 
-      if (buffer[spot-1] == '\n' &&
-          buffer[spot-2] == '\r')
+      if (buffer[spot-2] == '\r' && buffer[spot-1] == '\n')
         return true;
     }
+
+    usleep(1000000);
+    return false;
   }
 
   bool _checkResponse()
@@ -191,22 +188,27 @@ public:
 
     std::string d_type = pnh.param<std::string>("device_type", "GPS");
     if (d_type == "GPS")
+    {
       _device_type = DeviceType::GPS;
+
+      _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
+      _rmc_publisher = nh.advertise<nmea_msgs::Gprmc>("gprmc", 1);
+      _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
+      _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
+      _gsv_publisher = nh.advertise<nmea_msgs::Gpgsv>("gpgsv", 1);
+
+    }
     else if (d_type == "DPT")
+    {
       _device_type = DeviceType::DPT;
+
+      _dpt_publisher = nh.advertise<std_msgs::Float64>("dpt", 1);
+    }
     else
     {
       ROS_FATAL("Device type %s is unavailible", d_type.c_str());
       throw std::exception();
     }
-
-    _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
-    _rmc_publisher = nh.advertise<nmea_msgs::Gprmc>("gprmc", 1);
-    _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
-    _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
-    _gsv_publisher = nh.advertise<nmea_msgs::Gpgsv>("gpgsv", 1);
-
-    _dpt_publisher = nh.advertise<std_msgs::Float64>("dpt", 1);
   }
 
   NMEADevice(const NMEADevice&) = delete;
