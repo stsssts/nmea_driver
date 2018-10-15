@@ -14,76 +14,64 @@
 #include <nmea_msgs/Gpgsv.h>
 
 
-class NMEADevice
+class SerialHandle
 {
 public:
-  enum class DeviceType { GPS, DPT };
-
-  NMEADevice(ros::NodeHandle& nh)
+  SerialHandle() noexcept
   {
-    ros::NodeHandle pnh("~");
-    std::string addr = pnh.param<std::string>("port", "/dev/ttyUSB0");
-    int b_rate = pnh.param<int>("baudrate", 115200);
-
-    std::string d_type = pnh.param<std::string>("device_type", "GPS");
-    if (d_type == "GPS")
-      _device_type = DeviceType::GPS;
-    else if (d_type == "DPT")
-      _device_type = DeviceType::DPT;
-    else
-    {
-      ROS_FATAL("Device type %s is unavailible", d_type.c_str());
-      throw std::exception();
-    }
-      
-    _device_fd = open(addr.c_str(), O_RDONLY | O_NOCTTY);
-    if (_device_fd == -1)
-    {
-      ROS_FATAL("Device %s is unavailible", addr.c_str());
-      throw std::exception();
-    }
-
-    _configureDevice(b_rate);
-    _readLine(); // wipe input
-
-    _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
-    _rmc_publisher = nh.advertise<nmea_msgs::Gprmc>("gprmc", 1);
-    _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
-    _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
-    _gsv_publisher = nh.advertise<nmea_msgs::Gpgsv>("gpgsv", 1);
-
-    _dpt_publisher = nh.advertise<std_msgs::Float64>("dpt", 1);
+    _device_fd = -1;
   }
 
-  ~NMEADevice()
+  SerialHandle(const std::string& address, const int baudrate)
+  {
+    _device_fd = open(address.c_str(), O_RDONLY | O_NOCTTY);
+
+    if (_device_fd == -1)
+    {
+      ROS_FATAL("Device %s is unavailible", address.c_str());
+      throw std::exception();
+    }
+
+    _configureDevice(baudrate);
+    _readLine(); // wipe input
+  }
+
+  ~SerialHandle()
   {
     close(_device_fd);
   }
 
-  NMEADevice(const NMEADevice&) = delete;
+  SerialHandle(const SerialHandle&) = delete;
+  SerialHandle& operator=(const SerialHandle&) = delete;
 
-  NMEADevice operator=(const NMEADevice&) = delete;
+  SerialHandle(SerialHandle&& rhs) noexcept
+  {
+    _device_fd = rhs._device_fd;
+  }
 
-  void update()
+  SerialHandle& operator=(SerialHandle&& rhs) noexcept
+  {
+    _device_fd = rhs._device_fd;
+  }
+
+  bool getSentence(std::string& sentence)
   {
     _readLine();
+
     if (_checkResponse())
-      _parseResponce();
+    {
+      sentence = std::string(buffer+1);
+      return true;
+    }
+    else
+      return false;
   }
 
 private:
   int _device_fd;
   char buffer[82+1]; // maximum sentence length according to NMEA specification + \0
-  DeviceType _device_type;
 
-  ros::Publisher _hdt_publisher;
-  ros::Publisher _rmc_publisher;
-  ros::Publisher _gga_publisher;
-  ros::Publisher _gsa_publisher;
-  ros::Publisher _gsv_publisher;
-  ros::Publisher _dpt_publisher;
-
-  void _configureDevice(const int baudrate)
+  void _configureDevice(const unsigned& baudrate)
   {
     termios tty;
     memset(&tty, 0, sizeof tty);
@@ -186,28 +174,82 @@ private:
       return false;
     }
   }
+};
 
-  void _parseResponce()
+class NMEADevice
+{
+public:
+  enum class DeviceType { GPS, DPT };
+
+  NMEADevice(ros::NodeHandle& nh)
   {
-    char *c = buffer+1;
+    ros::NodeHandle pnh("~");
 
-    if (strncmp(c, "GP", 2) == 0)
+    std::string addr = pnh.param<std::string>("port", "/dev/ttyUSB0");
+    int b_rate = pnh.param<int>("baudrate", 115200);
+    _device = SerialHandle(addr, b_rate);
+
+    std::string d_type = pnh.param<std::string>("device_type", "GPS");
+    if (d_type == "GPS")
+      _device_type = DeviceType::GPS;
+    else if (d_type == "DPT")
+      _device_type = DeviceType::DPT;
+    else
     {
-      if (strncmp(c+2, "RMC", 3) == 0)
+      ROS_FATAL("Device type %s is unavailible", d_type.c_str());
+      throw std::exception();
+    }
+
+    _hdt_publisher = nh.advertise<std_msgs::Float64>("hdt", 1);
+    _rmc_publisher = nh.advertise<nmea_msgs::Gprmc>("gprmc", 1);
+    _gga_publisher = nh.advertise<nmea_msgs::Gpgga>("gpgga", 1);
+    _gsa_publisher = nh.advertise<nmea_msgs::Gpgsa>("gpgsa", 1);
+    _gsv_publisher = nh.advertise<nmea_msgs::Gpgsv>("gpgsv", 1);
+
+    _dpt_publisher = nh.advertise<std_msgs::Float64>("dpt", 1);
+  }
+
+  NMEADevice(const NMEADevice&) = delete;
+  NMEADevice& operator=(const NMEADevice&) = delete;
+
+  void update()
+  {
+    if (_device.getSentence(_sentence))
+      _parseSentence();
+  }
+
+private:
+  SerialHandle _device;
+  DeviceType _device_type;
+  std::string _sentence;
+
+  ros::Publisher _hdt_publisher;
+  ros::Publisher _rmc_publisher;
+  ros::Publisher _gga_publisher;
+  ros::Publisher _gsa_publisher;
+  ros::Publisher _gsv_publisher;
+  ros::Publisher _dpt_publisher;
+
+
+  void _parseSentence()
+  {
+    if (_sentence.compare(0, 2, "GP") == 0)
+    {
+      if (_sentence.compare(2, 3, "RMC") == 0)
         _publishRMC();
-      else if (strncmp(c+2, "GGA", 3) == 0)
+      else if (_sentence.compare(2, 3, "GGA") == 0)
         _publishGGA();
-      else if (strncmp(c+2, "GSA", 3) == 0)
+      else if (_sentence.compare(2, 3, "GSA") == 0)
         _publishGSA();
-      else if (strncmp(c+2, "GSV", 3) == 0)
+      else if (_sentence.compare(2, 3, "GSV") == 0)
         _publishGSV();
-      else if (strncmp(c+2, "HDT", 3) == 0)
+      else if (_sentence.compare(2, 3, "HDT") == 0)
         _publishHDT();
 
     }
-    else if (strncmp(c, "SD", 2) == 0)
+    else if (_sentence.compare(0, 2, "SD") == 0)
     {
-      if (strncmp(c+2, "DPT", 3) == 0)
+      if (_sentence.compare(2, 3, "DPT") == 0)
         _publishDPT();
     }
   }
@@ -235,7 +277,7 @@ private:
   {
     // $GPRMC,000101.20,V,0000.0000000,N,00000.0000000,E,0.00,0.00,,,,N*44
 
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer+7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     nmea_msgs::Gprmc msg;
     msg.header.stamp = ros::Time::now();
@@ -260,7 +302,7 @@ private:
   {
     // $GPGGA,144148.88,0000.0000000,N,00000.0000000,E,0,00,,-17.162,M,17.162,M,,*52
 
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     nmea_msgs::Gpgga msg;
     msg.header.stamp = ros::Time::now();
@@ -286,7 +328,7 @@ private:
   void _publishGSA()
   {
     // $GPGSA,A,1,,,,,,,,,,,,,,,,*32
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer +7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     nmea_msgs::Gpgsa msg;
     msg.header.stamp = ros::Time::now();
@@ -307,7 +349,7 @@ private:
   void _publishGSV()
   {
     // $GLGSV,1,1,0,,,,,*79
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     nmea_msgs::Gpgsv msg;
     msg.header.stamp = ros::Time::now();
@@ -332,7 +374,7 @@ private:
 
   void _publishHDT()
   {
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     if (!tokens[0].empty())
     {
@@ -347,10 +389,8 @@ private:
     /*
      * baudrate 4800
      * $SDDPT,25.1,0.0,*4D
-     *        ^    ^
-     *     depth  offset  
      */
-    std::vector<std::string> tokens = _splitSentence(std::string(buffer + 7), ',');
+    std::vector<std::string> tokens = _splitSentence(_sentence.substr(6), ',');
 
     if (!tokens[0].empty())
     {
